@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vega-trace-sdk"
+version = "0.1.0"
+description = "Mapping, metamorphosis and breathing traces kept as hashes on a custody chain, and the harmonic echo test of how settled a reasoning step is."
+requires-python = ">=3.10"
+dependencies = ["vega-custody-sdk"]
+license = {file = "LICENSE"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
