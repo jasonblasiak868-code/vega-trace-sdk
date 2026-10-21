@@ -81,14 +81,22 @@ def telemetry(access, step_id, **data):
 
 def cue(record, high_share=0.5, cv=1.0):
     """Advice only. True when the telemetry looks like something worth a person's attention (a large share of high-entropy tokens, or very uneven timing). It does not stop anything."""
+    if not isinstance(record, dict):
+        raise TierRefused("cue takes a telemetry record (a dict from telemetry())")
     for name, v in (("high_share", high_share), ("cv", cv)):
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
             raise TierRefused("%s threshold is a non-negative number" % name)
+
+    def number(d, key):
+        x = d.get(key, 0)
+        if isinstance(x, bool) or not isinstance(x, (int, float)):
+            raise TierRefused("%s in the record is a number" % key)
+        return x
     flags = []
     ent = record.get("entropy")
-    if isinstance(ent, dict) and ent.get("high_share", 0) >= high_share:
+    if isinstance(ent, dict) and number(ent, "high_share") >= high_share:
         flags.append("many high-entropy tokens")
     br = record.get("breathing")
-    if isinstance(br, dict) and br.get("cv", 0) >= cv:
+    if isinstance(br, dict) and number(br, "cv") >= cv:
         flags.append("uneven timing")
     return {"advice_only": True, "cue": bool(flags), "why": flags, "grants_authority": False}

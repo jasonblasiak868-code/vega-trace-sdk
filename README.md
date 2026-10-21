@@ -10,7 +10,7 @@ Telemetry of reasoning: three per-step traces kept as hashes and scalars on a cu
 |------|-------|
 | Version | 0.1.0 |
 | Status | Reference implementation; not independently security-reviewed; crypto not expert-reviewed |
-| Tests | 78 tests in 6 files, all passing (STATUS.md, REVIEW.md) |
+| Tests | 99 tests in 7 files, all passing (STATUS.md, REVIEW.md) |
 | Platform | Windows, macOS, Linux (CPython 3.10+) |
 | Layer | 10 — observe |
 
@@ -27,13 +27,13 @@ vega-trace-sdk provides **telemetry of reasoning** at three access tiers. It rec
 | Version | 0.1.0 |
 | Python | >= 3.10 |
 | Dependencies | vega-custody-sdk (runtime) |
-| Tests | 78 tests in 6 files, all passing (see STATUS.md, REVIEW.md) |
+| Tests | 99 tests in 7 files, all passing (see STATUS.md, REVIEW.md) |
 | Status | Reference implementation; not independently security-reviewed; crypto not expert-reviewed |
 
 ## End-to-end functions
 
 1. **Record a trace** — caller provides layer data (mapping/metamorphosis) or external timings (breathing) → `trace.mapping_record` / `metamorphosis_record` / `breathing_record` validates, digests, and returns a record → `trace.record(dag, rec)` appends to custody chain as `TRACE_MAPPING`, `TRACE_METAMORPHOSIS`, or `TRACE_BREATHING`.
-2. **Compare two traces** — `trace.compare(a, b)` reports identical/differing layers or breathing mean ratio; refuses mixed kinds or steps.
+2. **Compare two traces** — `trace.compare(a, b)` reports identical/differing layers or breathing mean ratio; for metamorphosis it reports both the layers whose outputs differ (`differ`) and the layers whose inputs differ (`differ_in`); refuses mixed kinds or steps, echo records and malformed records.
 3. **Score the harmonic echo** — `harmonic.melody(metamorphosis_record)` maps per-layer norm changes to semitones → `harmonic.score(notes)` returns dissonance, stuck-share, clarity, and verdict (CLEAR / MUDDY / DISSONANT / STUCK) → `harmonic.render_wav(notes, path)` writes deterministic mono WAV.
 4. **Run repeat-echo stability** — `echo.echo(run, step_id, variations)` calls caller's function N times, computes fundamental/overtones/resonance/verdict (STABLE / MIXED / UNSTABLE), optionally records to chain with hashes only.
 5. **Telemetry by access tier** — `tiers.telemetry(access, step_id, data)` refuses data the tier cannot see: weights → layers+consulted; probabilities → per_token_probs; text → timings_ns only. `tiers.cue(record)` returns advice-only flags (high entropy share, uneven timing); never grants authority.
@@ -44,7 +44,7 @@ vega-trace-sdk provides **telemetry of reasoning** at three access tiers. It rec
 
 | Knob / entry point | What it does |
 |--------------------|--------------|
-| `trace.MAX_LAYERS` (512), `MAX_POSITIONS` (4096), `MAX_TIMINGS` (100000) | Hard caps on trace size; exceed → `TraceRefused` |
+| `trace.MAX_LAYERS` (512), `MAX_POSITIONS` (4096), `MAX_TIMINGS` (100000), `MAX_TIMING_NS` (1e18) | Hard caps on trace size; exceed → `TraceRefused` |
 | `harmonic.MAX_LAYERS_RENDERED` (512), `SAMPLE_RATE` (22050), `NOTE_SECONDS` (0.15) | WAV render limits and audio parameters |
 | `harmonic.CONSONANT` (frozenset of semitone intervals) | Consonance definition for dissonance scoring |
 | `echo.MAX_ECHOES` (64), `MAX_CHARS` (1MiB), `STOP` (stopword set) | Echo batch size, text cap, word filtering |
@@ -112,11 +112,11 @@ A diagnostic UI design for this layer exists in the Vega OS interface program; i
 |-------------------|-----------|
 | `trace.digest_vector` | Refuses non-finite, non-numeric, oversized vectors (`TraceRefused`) |
 | `trace.mapping_record` | Refuses bad step ids, duplicate layers, oversized position lists, extra keys (`TraceRefused`) |
-| `trace.metamorphosis_record` | Refuses bad layer entries, non-finite norms (`TraceRefused`) |
+| `trace.metamorphosis_record` | Refuses bad layer entries and any vector whose length is not a finite number (`TraceRefused`) |
 | `trace.breathing_record` | Refuses negative timings, too few/too many samples (`TraceRefused`) |
 | `trace.record` | Refuses non-trace kinds, credential-shaped content via `contains_credential` (`TraceRefused`) |
 | `harmonic.melody` | Refuses non-metamorphosis records, non-boolean `changed`, non-finite norms (`HarmonicRefused`) |
-| `harmonic.render_wav` | Refuses >512 notes (`HarmonicRefused`) |
+| `harmonic.render_wav` | Refuses >512 notes, malformed notes and a frequency outside 20 to 20000 Hz (`HarmonicRefused`); the file is written beside the target and moved into place |
 | `echo.harmonics` / `echo.echo` | Refuses bad run callable, wrong variation count, oversized text, non-string returns (`EchoRefused`) |
 | `tiers.telemetry` | Refuses data the declared access tier cannot see (enforces tier boundary; `TierRefused`) |
 | `tiers.entropy_bits` | Refuses non-distributions (bad sums, negatives, NaN; `TierRefused`) |

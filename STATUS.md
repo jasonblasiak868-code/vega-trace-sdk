@@ -6,7 +6,7 @@
 - harmonic
 - echo
 
-Tests: 78 tests in 6 files, all passing.
+Tests: 99 tests in 7 files, all passing. Every fix in `tests/mutations.py` was checked by undoing it and confirming a test fails; two mutants survive and are equivalent (the echo `run must return text` check, which `harmonics` also makes, and the constant-time compare, which is a timing property no unit test can see).
 
 ## DESIGNED ONLY (not built)
 

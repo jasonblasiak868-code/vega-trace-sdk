@@ -17,6 +17,7 @@ from vega_custody.dag.dag import RecordRefused, contains_credential
 MAX_LAYERS = 512
 MAX_POSITIONS = 4096
 MAX_TIMINGS = 100000
+MAX_TIMING_NS = 1e18                  # about 31 years in nanoseconds: far past any real step, and small enough that the statistics below cannot overflow
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 
 
@@ -52,7 +53,10 @@ def digest_vector(values, places=6):
         out.append(0.0 if v == 0 else round(v, places))
         if len(out) > 10 ** 6:
             raise TraceRefused("vector too long")
-    return hashlib.sha256(json.dumps(out, separators=(",", ":")).encode()).hexdigest(), len(out), math.sqrt(sum(x * x for x in out))
+    norm = math.hypot(*out) if out else 0.0                       # hypot does not overflow on the squares; only a true length beyond a float is refused
+    if not math.isfinite(norm):
+        raise TraceRefused("the vector is too large to record: its length is not a finite number")
+    return hashlib.sha256(json.dumps(out, separators=(",", ":")).encode()).hexdigest(), len(out), norm
 
 
 def mapping_record(step_id, consulted):
@@ -106,6 +110,8 @@ def breathing_record(step_id, timings_ns):
     xs = sorted(_num(t, "timing") for t in timings_ns)
     if xs[0] < 0:
         raise TraceRefused("a timing cannot be negative")
+    if xs[-1] > MAX_TIMING_NS:
+        raise TraceRefused("a timing is at most %g nanoseconds" % MAX_TIMING_NS)
     n = len(xs)
     mean = sum(xs) / n
     var = sum((x - mean) ** 2 for x in xs) / (n - 1)
@@ -127,14 +133,23 @@ def record(dag, rec):
 
 
 def compare(a, b):
-    """Compare two records of the same kind for the same step. Mapping/metamorphosis: which layers differ (digest mismatch). Breathing: ratio of means. Returns a plain dict."""
-    if a.get("trace") != b.get("trace") or a.get("step") != b.get("step"):
+    """Compare two records of the same kind for the same step. Mapping: which layers' consulted positions differ. Metamorphosis: which layers' outputs differ (`differ`) and which layers' inputs differ
+    (`differ_in`); the pair is identical only when neither does and both cover the same layers. Breathing: ratio of means. Returns a plain dict. Echo records and malformed records are refused."""
+    if not isinstance(a, dict) or not isinstance(b, dict) or a.get("trace") != b.get("trace") or a.get("step") != b.get("step"):
         raise TraceRefused("only the same kind of trace for the same step can be compared")
     kind = a["trace"]
-    if kind == "breathing":
-        return {"mean_ratio": round(b["mean_ns"] / a["mean_ns"], 6) if a["mean_ns"] else None, "same_spread": abs(a["cv"] - b["cv"]) < 0.05}
-    la = {r["layer"]: r for r in a["layers"]}
-    lb = {r["layer"]: r for r in b["layers"]}
-    key = "positions_sha256" if kind == "mapping" else "out_sha256"
-    differ = sorted(n for n in la.keys() & lb.keys() if la[n][key] != lb[n][key])
-    return {"only_in_a": sorted(la.keys() - lb.keys()), "only_in_b": sorted(lb.keys() - la.keys()), "differ": differ, "identical": not differ and la.keys() == lb.keys()}
+    if kind not in ("mapping", "metamorphosis", "breathing"):
+        raise TraceRefused("only mapping, metamorphosis and breathing records can be compared")
+    try:
+        if kind == "breathing":
+            return {"mean_ratio": round(b["mean_ns"] / a["mean_ns"], 6) if a["mean_ns"] else None, "same_spread": abs(a["cv"] - b["cv"]) < 0.05}
+        la = {r["layer"]: r for r in a["layers"]}
+        lb = {r["layer"]: r for r in b["layers"]}
+        key = "positions_sha256" if kind == "mapping" else "out_sha256"
+        shared = la.keys() & lb.keys()
+        differ = sorted(n for n in shared if la[n][key] != lb[n][key])
+        differ_in = sorted(n for n in shared if la[n]["in_sha256"] != lb[n]["in_sha256"]) if kind == "metamorphosis" else []
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise TraceRefused("a record is malformed: %s" % exc)
+    return {"only_in_a": sorted(la.keys() - lb.keys()), "only_in_b": sorted(lb.keys() - la.keys()), "differ": differ, "differ_in": differ_in,
+            "identical": not differ and not differ_in and la.keys() == lb.keys()}

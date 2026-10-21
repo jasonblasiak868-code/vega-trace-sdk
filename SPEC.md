@@ -8,7 +8,7 @@ Spec v1.0 — 2026-10-19 — describes the published reference implementation as
 |------|-------|
 | Version | 0.1.0 |
 | Status | Reference implementation; not independently security-reviewed; crypto not expert-reviewed |
-| Tests | 78 tests in 6 files, all passing |
+| Tests | 99 tests in 7 files, all passing |
 | Layer | 10 — observe |
 | Dependencies | vega-custody-sdk |
 
@@ -66,7 +66,7 @@ mapping_record(step_id, consulted) → record dict
 metamorphosis_record(step_id, layers) → record dict
 breathing_record(step_id, timings_ns) → record dict
 record(dag, rec) → custody entry
-compare(a, b) → dict with identical, differ, only_in_a, only_in_b
+compare(a, b) → dict with identical, differ, differ_in, only_in_a, only_in_b
 TraceRefused exception
 ```
 
@@ -97,7 +97,7 @@ echo_record(step_id, notes) → chain record with verdict, clarity, melody_sha25
 HarmonicRefused exception
 ```
 
-**Behavior:** `melody` computes semitones = clamp(12 * log2(norm_out / norm_in), -24, +24); zero norms map to ±24 or 0. `score` computes dissonance as share of non-consonant consecutive intervals (CONSONANT = {0,3,4,5,7,8,9,12}); stuck_share = fraction of `stuck` layers; clarity = 1 - 0.6*dissonance - 0.4*stuck_share; verdict rules as above. `render_wav` writes 16-bit mono sine tones, 0.15s each, faint amplitude (0.05) for stuck layers. `compare_clarity` reports means, difference, and small-sample warning.
+**Behavior:** `melody` computes semitones = clamp(12 * (log2(norm_out) - log2(norm_in)), -24, +24); zero norms map to ±24 or 0. `score` computes dissonance as share of non-consonant consecutive intervals (CONSONANT = {0,3,4,5,7,8,9,12}); stuck_share = fraction of `stuck` layers; clarity = 1 - 0.6*dissonance - 0.4*stuck_share; verdict rules as above. `render_wav` writes 16-bit mono sine tones, 0.15s each, faint amplitude (0.05) for stuck layers. `compare_clarity` reports means, difference, and small-sample warning.
 
 **Failure modes:** Non-metamorphosis records, missing fields, non-boolean `changed`, non-finite/negative norms, >512 layers → `HarmonicRefused`. WAV render refuses >512 notes. `compare_clarity` refuses non-lists, values outside [0,1].
 
@@ -190,7 +190,8 @@ SignatureRefused exception
 ```python
 ObserveLedger(dag) with observe(step_id, prompt_class, prompt_sha256, profile, capsule_head), determinism(prompt_class, prompt_sha256), class_similarity(), brightest(n)
 stamp(dag, run_id, expectations) → {run, stamp_sha256, expectations}
-grade(stamp_obj, observed, tolerance) → {rows, hits, misses, rate, note}
+grade(stamp_obj, observed, tolerance=0.0, dag=None) → {rows, hits, misses, rate, note, stamp_on_chain, stamp_note}
+(a run id can be stamped once; grade proves the stamp predates the run only when `dag` is passed and the stamp is found on its chain)
 commit_trace(trace_record, salt, key) → hex commitment
 open_commitment(commitment, trace_record, salt, key) → bool (constant-time)
 prove_derivation(*args, **kwargs) → raises ProofUnavailable
@@ -279,7 +280,7 @@ PYTHONPATH=src:../vega-custody-sdk/src python -m pytest tests/
 python -m unittest discover tests
 ```
 
-78 tests in 6 files must pass.
+99 tests in 7 files must pass.
 
 Passing means: the published reference implementation behaves as specified — validation refuses bad inputs, records contain only hashes/scalars, tier boundaries are enforced, fail-closed points hold.
 

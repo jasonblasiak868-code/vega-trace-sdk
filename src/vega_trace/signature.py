@@ -7,10 +7,12 @@
   atlas() aggregates frozen computations by KNOWN epistemic status (definitional fact; derived; empirical; circumstantial; disputed; known falsehood) to show how telemetry differs by status.
 Telemetry here is a small numeric feature vector (features() builds one from a tier-2 entropy record). No raw activations are held."""
 import math
+import threading
 
 from vega_trace import trace as T
 
 MIN_FOR_SIGNATURE = 10
+MAX_TELEMETRY = 1e100                 # larger numbers cannot be squared safely in the statistics below
 STATUSES = ("definitional", "derived", "empirical", "circumstantial", "disputed", "falsehood")
 FEATURES = ("mean_bits", "sd_bits", "max_bits", "p90_bits", "high_share")
 
@@ -22,7 +24,7 @@ class SignatureRefused(ValueError):
 def features(entropy_record):
     if not isinstance(entropy_record, dict) or entropy_record.get("kind") != "entropy" or any(k not in entropy_record for k in FEATURES):
         raise SignatureRefused("features takes a tier-2 entropy record")
-    return [float(entropy_record[k]) for k in FEATURES]
+    return _vec([entropy_record[k] for k in FEATURES])
 
 
 def _vec(v, dim=None):
@@ -30,8 +32,8 @@ def _vec(v, dim=None):
         raise SignatureRefused("a telemetry vector is a list of numbers")
     out = []
     for x in v:
-        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
-            raise SignatureRefused("a telemetry vector holds finite numbers")
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or abs(x) > MAX_TELEMETRY:
+            raise SignatureRefused("a telemetry vector holds finite numbers no larger than %g" % MAX_TELEMETRY)
         out.append(float(x))
     if not 1 <= len(out) <= 64 or (dim is not None and len(out) != dim):
         raise SignatureRefused("a telemetry vector has 1..64 numbers and the signature's own length")
@@ -44,6 +46,7 @@ class ReferenceSignature:
         T._id(domain, "domain")
         self.model_id, self.domain = model_id, domain
         self.n, self.mean, self.m2 = 0, None, None
+        self._lock = threading.RLock()
 
     def add_verified(self, vector, grade, committed):
         """Add one assertion's telemetry. grade must be exactly 'FACT' (two independent sources or a commit) and committed must be exactly True (the addition itself is a committed act)."""
@@ -51,33 +54,36 @@ class ReferenceSignature:
             raise SignatureRefused("only an assertion graded FACT can enter the reference signature")
         if committed is not True:
             raise SignatureRefused("the signature changes only by a committed addition")
-        v = _vec(vector, None if self.mean is None else len(self.mean))
-        if self.mean is None:
-            self.mean, self.m2 = [0.0] * len(v), [0.0] * len(v)
-        self.n += 1
-        for i, x in enumerate(v):                                  # Welford: running mean and sum of squares
-            d = x - self.mean[i]
-            self.mean[i] += d / self.n
-            self.m2[i] += d * (x - self.mean[i])
+        with self._lock:
+            v = _vec(vector, None if self.mean is None else len(self.mean))
+            if self.mean is None:
+                self.mean, self.m2 = [0.0] * len(v), [0.0] * len(v)
+            self.n += 1
+            for i, x in enumerate(v):                              # Welford: running mean and sum of squares
+                d = x - self.mean[i]
+                self.mean[i] += d / self.n
+                self.m2[i] += d * (x - self.mean[i])
 
     def sd(self):
         return [math.sqrt(m / (self.n - 1)) if self.n > 1 else 0.0 for m in self.m2]
 
     def asserted_value(self, vector):
         """RMS z-distance of the vector from the signature. None when there are too few verified assertions to mean anything (no basis, not zero)."""
-        if self.n < MIN_FOR_SIGNATURE:
-            return None
-        v = _vec(vector, len(self.mean))
-        sd = self.sd()
+        with self._lock:
+            if self.n < MIN_FOR_SIGNATURE:
+                return None
+            v = _vec(vector, len(self.mean))
+            sd = self.sd()
+            mean = list(self.mean)
         scale = max(max(sd), 1e-9)
-        return round(math.sqrt(sum(((x - m) / max(s, 0.05 * scale)) ** 2 for x, m, s in zip(v, self.mean, sd)) / len(v)), 6)
+        return round(math.sqrt(sum(((x - m) / max(s, 0.05 * scale)) ** 2 for x, m, s in zip(v, mean, sd)) / len(v)), 6)
 
 
 def calibrate(verified_values, failed_values):
     """The asserted values of assertions later verified vs. those that failed verification."""
     for name, xs in (("verified", verified_values), ("failed", failed_values)):
-        if not isinstance(xs, (list, tuple)) or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x < 0 for x in xs):
-            raise SignatureRefused("%s is a list of non-negative asserted values" % name)
+        if not isinstance(xs, (list, tuple)) or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x < 0 or x > MAX_TELEMETRY for x in xs):
+            raise SignatureRefused("%s is a list of non-negative asserted values no larger than %g" % (name, MAX_TELEMETRY))
     nv, nf = len(verified_values), len(failed_values)
     if nv < 2 or nf < 2:
         return {"n_verified": nv, "n_failed": nf, "difference": None, "note": "at least two of each are needed"}

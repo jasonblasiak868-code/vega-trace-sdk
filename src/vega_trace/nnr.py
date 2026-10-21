@@ -11,12 +11,16 @@ import hashlib
 import hmac
 import json
 import math
+import threading
 
 from vega_custody.dag.dag import RecordRefused
 from vega_trace import trace as T
 
 CLASSES = ("computational", "cache", "novel")
 MAX_HEADS = 4096
+MAX_STORED_HEADS = 2000000        # all head magnitudes the ledger will hold in memory; an observation past this is refused before anything is recorded
+MAX_REGION = 2000
+_STAMP_LOCK = threading.Lock()
 
 
 class NnrRefused(ValueError):
@@ -56,6 +60,8 @@ class ObserveLedger:
         self.dag = dag
         self.cum = {}
         self.runs = {}
+        self._stored = 0
+        self._lock = threading.Lock()
 
     def observe(self, step_id, prompt_class, prompt_sha256, profile, capsule_head):
         T._id(step_id, "step_id")
@@ -68,13 +74,17 @@ class ObserveLedger:
         top = sorted(p.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
         rec = {"trace": "mapping", "kind": "nnr007_observation", "step": step_id, "class": prompt_class, "prompt_sha256": prompt_sha256, "body_sha256": _digest(p), "capsule_head": capsule_head,
                "heads": len(p), "top": [[k[0], k[1], round(v, 4)] for k, v in top]}
-        try:
-            e = self.dag.record("TRACE_NNR007", rec)
-        except RecordRefused as exc:
-            raise NnrRefused(str(exc))
-        for k, v in p.items():
-            self.cum[k] = self.cum.get(k, 0.0) + v
-        self.runs.setdefault((prompt_class, prompt_sha256), []).append(p)
+        with self._lock:
+            if self._stored + len(p) > MAX_STORED_HEADS:
+                raise NnrRefused("the ledger holds as many head magnitudes as it is allowed (%d)" % MAX_STORED_HEADS)
+            try:
+                e = self.dag.record("TRACE_NNR007", rec)
+            except RecordRefused as exc:
+                raise NnrRefused(str(exc))
+            for k, v in p.items():
+                self.cum[k] = self.cum.get(k, 0.0) + v
+            self.runs.setdefault((prompt_class, prompt_sha256), []).append(p)
+            self._stored += len(p)
         return e
 
     def determinism(self, prompt_class, prompt_sha256):
@@ -106,57 +116,99 @@ class ObserveLedger:
         return [[k[0], k[1], round(v, 4)] for k, v in sorted(self.cum.items(), key=lambda kv: (-kv[1], kv[0]))[:n]]
 
 
-def stamp(dag, run_id, expectations):
-    """expectations: [{"region": text, "direction": 'up'|'down'|'none'}]. Recorded BEFORE the run; returns the stamp (its hash is what grade() later requires)."""
-    T._id(run_id, "run_id")
+def _expectations(expectations):
+    """The rules for a list of expectations, used both when a stamp is made and when one is graded."""
     if not isinstance(expectations, (list, tuple)) or not 1 <= len(expectations) <= 500:
         raise NnrRefused("expectations is a list of 1..500")
     seen = set()
     for e in expectations:
-        if not isinstance(e, dict) or set(e) != {"region", "direction"} or e["direction"] not in ("up", "down", "none") or not isinstance(e["region"], str) or not e["region"].strip() or e["region"] in seen:
-            raise NnrRefused("each expectation is {region (new text), direction up|down|none}")
+        if (not isinstance(e, dict) or set(e) != {"region", "direction"} or e["direction"] not in ("up", "down", "none") or not isinstance(e["region"], str)
+                or not e["region"].strip() or len(e["region"]) > MAX_REGION or e["region"] in seen):
+            raise NnrRefused("each expectation is {region (new text, at most %d characters, not repeated), direction up|down|none}" % MAX_REGION)
         seen.add(e["region"])
-    h = hashlib.sha256(json.dumps(sorted((e["region"], e["direction"]) for e in expectations)).encode()).hexdigest()
-    try:
-        dag.record("TRACE_STAMP", {"run": run_id, "stamp_sha256": h, "n": len(expectations)})
-    except RecordRefused as exc:
-        raise NnrRefused(str(exc))
+    return list(expectations)
+
+
+def _stamp_hash(expectations):
+    return hashlib.sha256(json.dumps(sorted((e["region"], e["direction"]) for e in expectations)).encode()).hexdigest()
+
+
+def _chain_stamps(dag):
+    """TRACE_STAMP payloads already on the chain, or None when `dag` is not a custody Dag that can be read."""
+    entries = getattr(getattr(dag, "content", None), "entries", None)
+    if entries is None:
+        return None
+    return [e["payload"] for e in entries() if e.get("kind") == "TRACE_STAMP"]
+
+
+def stamp(dag, run_id, expectations):
+    """expectations: [{"region": text, "direction": 'up'|'down'|'none'}]. Recorded BEFORE the run; returns the stamp (its hash is what grade() later requires). A run id can be stamped once: a second
+    stamp for the same run is refused, so expectations cannot be rewritten after the results are seen. (The refusal covers one process; another process writing the same chain at the same moment is not
+    prevented by this check.)"""
+    T._id(run_id, "run_id")
+    expectations = _expectations(expectations)
+    h = _stamp_hash(expectations)
+    with _STAMP_LOCK:
+        existing = _chain_stamps(dag)
+        if existing is not None and any(p.get("run") == run_id for p in existing):
+            raise NnrRefused("run %s already has a stamp on the chain" % run_id)
+        try:
+            dag.record("TRACE_STAMP", {"run": run_id, "stamp_sha256": h, "n": len(expectations)})
+        except RecordRefused as exc:
+            raise NnrRefused(str(exc))
     return {"run": run_id, "stamp_sha256": h, "expectations": [dict(e) for e in expectations]}
 
 
-def grade(stamp_obj, observed, tolerance=0.0):
-    """observed: {region: signed change}. A region expected 'up' is a HIT if its change exceeds +tolerance, 'down' below -tolerance, 'none' within +/- tolerance. A region not observed is a MISS."""
+def grade(stamp_obj, observed, tolerance=0.0, dag=None):
+    """observed: {region: signed change}. A region expected 'up' is a HIT if its change exceeds +tolerance, 'down' below -tolerance, 'none' within +/- tolerance. A region not observed is a MISS.
+    The stamp is checked against itself (it was not altered since stamp() returned it). That alone cannot show it was made BEFORE the run: pass `dag` and the stamp must also be on the chain, found by run id
+    and hash. Without `dag` the result says the chain was not checked."""
     if not isinstance(stamp_obj, dict) or not isinstance(stamp_obj.get("expectations"), list):
         raise NnrRefused("grade takes the stamp from stamp()")
-    h = hashlib.sha256(json.dumps(sorted((e["region"], e["direction"]) for e in stamp_obj["expectations"])).encode()).hexdigest()
+    exps = _expectations(stamp_obj["expectations"])
+    h = _stamp_hash(exps)
     if h != stamp_obj.get("stamp_sha256"):
         raise NnrRefused("the stamp was altered after it was recorded")
     if not isinstance(observed, dict) or isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or tolerance < 0:
         raise NnrRefused("observed is a dict of region to change; tolerance is non-negative")
+    on_chain = False
+    if dag is not None:
+        stamps = _chain_stamps(dag)
+        if stamps is None:
+            raise NnrRefused("dag is not a custody Dag whose chain can be read")
+        if not any(p.get("run") == stamp_obj.get("run") and p.get("stamp_sha256") == h for p in stamps):
+            raise NnrRefused("this stamp is not on the chain: it cannot be shown to predate the run")
+        on_chain = True
     rows = []
-    for e in stamp_obj["expectations"]:
+    for e in exps:
         v = observed.get(e["region"])
         ok = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and ((e["direction"] == "up" and v > tolerance) or (e["direction"] == "down" and v < -tolerance) or (e["direction"] == "none" and abs(v) <= tolerance))
         rows.append({"region": e["region"], "expected": e["direction"], "result": "HIT" if ok else "MISS"})
     hits = sum(1 for r in rows if r["result"] == "HIT")
-    return {"rows": rows, "hits": hits, "misses": len(rows) - hits, "rate": round(hits / len(rows), 4), "note": "misses are kept: a calibration that hides its misses is not one"}
+    return {"rows": rows, "hits": hits, "misses": len(rows) - hits, "rate": round(hits / len(rows), 4), "note": "misses are kept: a calibration that hides its misses is not one",
+            "stamp_on_chain": on_chain,
+            "stamp_note": "the stamp was found on the chain" if on_chain else "the stamp was not checked against the chain; pass dag to show it was recorded before the run"}
 
 
 def _canon(rec):
-    return json.dumps(rec, sort_keys=True, separators=(",", ":")).encode()
+    return json.dumps(rec, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
 def commit_trace(trace_record, salt, key):
     """HMAC-SHA256 over the canonical trace with a salt, under a key the holder keeps. Returns the hex commitment; reveal (trace, salt) and the verifier with the key can check it."""
     if not isinstance(trace_record, dict) or not isinstance(salt, (bytes, bytearray)) or len(salt) < 16 or not isinstance(key, (bytes, bytearray)) or len(key) < 16:
         raise NnrRefused("a trace is a dict; the salt and the key are at least 16 bytes each")
-    return hmac.new(bytes(key), bytes(salt) + b"\x00" + _canon(trace_record), hashlib.sha256).hexdigest()
+    try:
+        body = _canon(trace_record)
+    except (TypeError, ValueError) as exc:
+        raise NnrRefused("the trace cannot be written as canonical JSON: %s" % exc)
+    return hmac.new(bytes(key), bytes(salt) + b"\x00" + body, hashlib.sha256).hexdigest()
 
 
 def open_commitment(commitment, trace_record, salt, key):
     try:
         return hmac.compare_digest(commitment, commit_trace(trace_record, salt, key))
-    except (NnrRefused, TypeError):
+    except (NnrRefused, TypeError, ValueError):
         return False
 
 

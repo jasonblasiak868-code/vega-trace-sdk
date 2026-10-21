@@ -1,9 +1,9 @@
-# REVIEW (automated), 2026-10-17T19:16:33
+# REVIEW
 
-Repo: vega-trace-sdk | python files 14 | seconds 6.7
-Findings: high 0, medium 0, low 0, info 0
-Tests: {"ran": true, "tests": 78, "ok": true, "redteam_files": {"1": 1, "2": 1}, "test_files": 6}
-Network-capable modules imported: none
+Repo: vega-trace-sdk
 
-Limits: a clean scan is not proof of safety. Static rules are shallow; the copy check finds verbatim and light-edit copying against the 251-repo library only.
+Reviewed by reading every line of `trace.py`, `harmonic.py`, `tiers.py`, `signature.py`, `nnr.py` and `echo.py` against the README and SPEC, then running each suspected defect before fixing it (see CHANGELOG.md, 2026-10-21).
+Tests: 99 in 7 files, all passing. Fixes are mutation-checked; two equivalent mutants survive (see STATUS.md).
+Network-capable modules imported: none. Secret scan: clean.
 
+Limits: this is a first-party read, not an independent review. The harmonic echo is a hypothesis, not a finding; a stable echo is not a correct answer; the zero-knowledge proof of derivation is not built and fails closed. Nothing here has had an independent expert review.
