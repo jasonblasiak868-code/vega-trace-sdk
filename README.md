@@ -2,6 +2,12 @@
 
 ![vega-trace-sdk](assets/tile.svg)
 
+<!-- vega-install-order -->
+> **Build order: 2/2. This kit needs 1 other Vega kit installed first.** Install them in this order, then this one:
+> 1/2 `vega-custody-sdk`  
+> 2/2 `vega-trace-sdk` (this kit)
+> Install each with `pip install --no-deps git+https://github.com/jasonblasiak868-code/<name>` in the order shown. Full steps: [INTEGRATION_GUIDE](https://github.com/jasonblasiak868-code/vega-umbrella-sdk/blob/main/INTEGRATION_GUIDE.md).
+
 Telemetry of reasoning: three per-step traces kept as hashes and scalars on a custody chain, and the harmonic echo test that scores how settled a reasoning step sounds. This kit owns the **observe** concern — what happened, captured honestly at every access tier, without ever holding raw activations.
 
 ## At a glance
